@@ -2,7 +2,7 @@
 
 The engine holds an internal subcell pixel buffer (2x4 dots per character cell)
 and exposes the usual drawing primitives (line, circle, filled_circle, pixel,
-polyline). `commit_to(grid)` walks the buffer, derives a Unicode Braille
+polyline, text). `commit_to(grid)` walks the buffer, derives a Unicode Braille
 codepoint per cell, picks the dominant color among lit subpixels, and writes
 the result into the grid.
 
@@ -16,11 +16,53 @@ import math
 from typing import Iterable
 
 import numpy as np
+import pygame
 
 from .grid import SymbolGrid
 
 
 _BRAILLE_BASE = 0x2800
+
+DEFAULT_FONT_NAME = "menlo,monaco,courier,couriernew,monospace"
+DEFAULT_FONT_SIZE = 11
+
+# Cache of rasterized glyph bitmaps, keyed by (font_name, font_size, bold).
+# Each entry maps char -> (width, height, 1-bit bytearray of length w*h).
+_GLYPH_CACHES: dict[tuple[str, int, bool], dict[str, tuple[int, int, bytearray]]] = {}
+
+
+def _get_glyph_cache(font_name: str, font_size: int, bold: bool) -> dict:
+    key = (font_name, font_size, bold)
+    cache = _GLYPH_CACHES.get(key)
+    if cache is not None:
+        return cache
+
+    if not pygame.font.get_init():
+        pygame.font.init()
+    font = pygame.font.SysFont(font_name, font_size, bold=bold)
+
+    cache = {}
+    for code in range(32, 127):
+        ch = chr(code)
+        surf = font.render(ch, False, (255, 255, 255), (0, 0, 0))
+        w, h = surf.get_size()
+        bits = bytearray(w * h)
+        for y in range(h):
+            for x in range(w):
+                if surf.get_at((x, y))[0] > 128:
+                    bits[y * w + x] = 1
+        cache[ch] = (w, h, bits)
+    _GLYPH_CACHES[key] = cache
+    return cache
+
+
+def prebuild_glyphs(
+    font_name: str = DEFAULT_FONT_NAME,
+    font_size: int = DEFAULT_FONT_SIZE,
+    bold: bool = False,
+) -> None:
+    """Eagerly rasterize the glyph cache for a font/size so the first frame has no hitch."""
+    _get_glyph_cache(font_name, font_size, bold)
 
 # Bit-weight matrix indexed [dy][dx] for vectorized codepoint computation.
 # Encodes Unicode dot numbering (dot 1 -> bit 0, dot 4 -> bit 3, dot 7 -> bit 6,
@@ -107,6 +149,56 @@ class BrailleEngine:
             dx_max = math.sqrt(max(r_sq - dy * dy, 0))
             for dx in range(int(-dx_max), int(dx_max) + 1):
                 set_pixel(cx + dx, cy + dy, color)
+
+    def text(
+        self,
+        s: str,
+        x: float,
+        y: float,
+        color: int = 0,
+        font_size: int = DEFAULT_FONT_SIZE,
+        font_name: str = DEFAULT_FONT_NAME,
+        bold: bool = False,
+    ) -> int:
+        """Draw `s` starting at (x, y) in subpixel coords.
+
+        Each glyph pixel becomes one Braille subpixel. Returns the x advance
+        (subpixel coord just past the last glyph) so callers can chain runs.
+        """
+        cache = _get_glyph_cache(font_name, font_size, bold)
+        fallback = cache.get('?')
+        set_pixel = self.pixel
+        cx = int(x)
+        iy = int(y)
+        for ch in s:
+            glyph = cache.get(ch) or fallback
+            if glyph is None:
+                continue
+            gw, gh, bits = glyph
+            for gy in range(gh):
+                base = gy * gw
+                py = iy + gy
+                for gx in range(gw):
+                    if bits[base + gx]:
+                        set_pixel(cx + gx, py, color)
+            cx += gw
+        return cx
+
+    def measure_text(
+        self,
+        s: str,
+        font_size: int = DEFAULT_FONT_SIZE,
+        font_name: str = DEFAULT_FONT_NAME,
+        bold: bool = False,
+    ) -> tuple[int, int]:
+        """Return (width, height) of `s` in subpixels at the given font."""
+        cache = _get_glyph_cache(font_name, font_size, bold)
+        fallback = cache.get('?')
+        if not s:
+            return (0, 0)
+        width = sum((cache.get(ch) or fallback)[0] for ch in s)
+        height = max((cache.get(ch) or fallback)[1] for ch in s)
+        return (width, height)
 
     # --- Bake into grid ---
 

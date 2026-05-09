@@ -8,7 +8,7 @@ Public API:
     DEFAULT_PALETTE — color ID -> RGB lookup
 """
 
-from .braille import BrailleEngine
+from .braille import BrailleEngine, prebuild_glyphs
 from .grid import SymbolGrid
 from .input import InputHandler
 from .palette import DEFAULT_PALETTE
@@ -20,4 +20,5 @@ __all__ = [
     "BrailleEngine",
     "InputHandler",
     "DEFAULT_PALETTE",
+    "prebuild_glyphs",
 ]
